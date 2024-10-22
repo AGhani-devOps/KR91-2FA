@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Backend system for single-use tokens using AWS services
+
+Parameters:
+  DBName:
+    Type: String
+    Default: "TwoFactorAuthTokens"
+    Description: "The name of the DynamoDB table for storing tokens"
+  Region:
+    Type: String
+    Default: "us-east-1"
+    Description: "The AWS region where resources will be created"
+
+Resources:
+  TokenTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: !Ref DBName
+      AttributeDefinitions:
+        - AttributeName: 'token'
+          AttributeType: 'S'
+        - AttributeName: 'userId'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'token'
+          KeyType: 'HASH'
+        - AttributeName: 'userId'
+          KeyType: 'RANGE'
+      BillingMode: 'PAY_PER_REQUEST'
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSNSFullAccess'
+
+  GenerateTokenFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'GenerateTokenFunction'
+      Handler: 'lambda_function.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: 'python3.12'
+      Environment:
+        Variables:
+          DBName: !Ref DBName
+          Region: !Ref Region
+      Code:
+        S3Bucket: mylambdafunctions002
+        S3Key: Generatetoken.zip
+
+  ValidateTokenFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'ValidateTokenFunction'
+      Handler: 'lambda_function.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: 'python3.12'
+      Environment:
+        Variables:
+          DBName: !Ref DBName
+          Region: !Ref Region
+      Code:
+        S3Bucket: mylambdafunctions002
+        S3Key: Validatetoken.zip
+
+  GenerateTokenAPI:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: 'GenerateTokenAPI'
+
+  GenerateTokenResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref GenerateTokenAPI
+      ParentId: !GetAtt GenerateTokenAPI.RootResourceId
+      PathPart: 'generatetoken'
+
+  GenerateTokenMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: 'NONE'
+      HttpMethod: 'POST'
+      ResourceId: !Ref GenerateTokenResource
+      RestApiId: !Ref GenerateTokenAPI
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GenerateTokenFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: '200'
+        - StatusCode: '400'
+        - StatusCode: '500'
+
+  GenerateTokenFunctionPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref GenerateTokenFunction
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${GenerateTokenAPI}/*/POST/generatetoken
+
+  ValidateTokenAPI:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: 'ValidateTokenAPI'
+
+  ValidateTokenResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref ValidateTokenAPI
+      ParentId: !GetAtt ValidateTokenAPI.RootResourceId
+      PathPart: 'validatetoken'
+
+  ValidateTokenMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: 'NONE'
+      HttpMethod: 'POST'
+      ResourceId: !Ref ValidateTokenResource
+      RestApiId: !Ref ValidateTokenAPI
+      Integration:
+        IntegrationHttpMethod: 'POST'
+        Type: 'AWS_PROXY'
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ValidateTokenFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: '200'
+        - StatusCode: '400'
+        - StatusCode: '500'
+
+  ValidateTokenFunctionPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ValidateTokenFunction
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ValidateTokenAPI}/*/POST/validatetoken
+
+  GenerateTokenDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn: GenerateTokenMethod
+    Properties:
+      RestApiId: !Ref GenerateTokenAPI
+      StageName: 't1'
+
+  ValidateTokenDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn: ValidateTokenMethod
+    Properties:
+      RestApiId: !Ref ValidateTokenAPI
+      StageName: 't2'
+
+Outputs:
+  GenerateTokenApiUrl:
+    Description: "URL for Generate Token API"
+    Value: !Sub "https://${GenerateTokenAPI}.execute-api.${AWS::Region}.amazonaws.com/t1/generatetoken"
+  ValidateTokenApiUrl:
+    Description: "URL for Validate Token API"
+    Value: !Sub "https://${ValidateTokenAPI}.execute-api.${AWS::Region}.amazonaws.com/t2/validatetoken"
